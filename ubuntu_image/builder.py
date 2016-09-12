@@ -4,6 +4,7 @@
 import os
 import shutil
 import logging
+import tarfile
 
 from contextlib import ExitStack, contextmanager
 from math import ceil
@@ -83,6 +84,7 @@ class ModelAssertionBuilder(State):
         self.rootfs_size = 0
         self.bootfs = None
         self.bootfs_sizes = None
+        self.recoveryfs = None
         self.images = None
         self.boot_images = None
         self.root_img = None
@@ -312,8 +314,33 @@ class ModelAssertionBuilder(State):
         os.truncate(self.root_img, avail_space * MiB(1))
         # We defer creating the root file system image because we have to
         # populate it at the same time.  See mkfs.ext4(8) for details.
-        self._next.append(self.populate_filesystems)
+        self._next.append(self.populate_recoveryfs_content)
 
+    def populate_recoveryfs_content(self):
+	# Populate writable/system-boot partition backup tarball in this
+	# partition.
+
+        volume = list(self.gadget.volumes.values())[0]
+        # Only recovery partition structure exist needs to populate recovery.
+        for partnum, part in enumerate(volume.structures):
+            target_dir = os.path.join(self.workdir, 'part{}'.format(partnum))
+            # XXX: Use fs label for the moment, until we get a proper way to
+            # identify the boot partition.
+            if part.name == 'recovery':
+                # Backup writable partition
+                self.recoveryfs = target_dir
+                tar = tarfile.open('{}/writable.tar.xz'.format(self.recoveryfs), 'w:xz')
+                system_data_dir = os.path.join(self.rootfs)
+                tar.add(system_data_dir)
+                tar.close()
+                # Backup system-boot partition
+                tar = tarfile.open('{}/system-boot.tar.xz'.format(self.recoveryfs), 'w:xz')
+                system_data_dir = os.path.join(self.bootfs)
+                tar.add(system_data_dir)
+                tar.close()
+
+        self._next.append(self.populate_filesystems)
+        
     def populate_filesystems(self):
         volumes = self.gadget.volumes.values()
         assert len(volumes) == 1, 'For now, only one volume is allowed'
