@@ -10,6 +10,8 @@ from contextlib import ExitStack, contextmanager
 from math import ceil
 from operator import attrgetter
 from tempfile import TemporaryDirectory
+from fnmatch import fnmatch
+from distutils.dir_util import copy_tree
 from ubuntu_image.helpers import MiB, run, snap, sparse_copy
 from ubuntu_image.image import Image, MBRImage
 from ubuntu_image.parser import BootLoader, FileSystemType,\
@@ -59,6 +61,7 @@ def _mkfs_ext4(img_file, contents_dir, label='writable'):
 
 
 class ModelAssertionBuilder(State):
+
     def __init__(self, args):
         super().__init__()
         # The working directory will contain several bits as we stitch
@@ -317,8 +320,8 @@ class ModelAssertionBuilder(State):
         self._next.append(self.populate_recoveryfs_content)
 
     def populate_recoveryfs_content(self):
-	# Populate writable/system-boot partition backup tarball in this
-	# partition.
+        # Populate writable/system-boot partition backup tarball in this
+        # partition.
 
         volume = list(self.gadget.volumes.values())[0]
         # Only recovery partition structure exist needs to populate recovery.
@@ -329,18 +332,50 @@ class ModelAssertionBuilder(State):
             if part.name == 'recovery':
                 # Backup writable partition
                 self.recoveryfs = target_dir
-                tar = tarfile.open('{}/writable.tar.xz'.format(self.recoveryfs), 'w:xz')
-                system_data_dir = os.path.join(self.rootfs)
-                tar.add(system_data_dir)
+                tar = tarfile.open(
+                    '{}/writable.tar.xz'.format(self.recoveryfs), 'w:xz')
+                tar.add(self.rootfs, arcname='.')
                 tar.close()
                 # Backup system-boot partition
-                tar = tarfile.open('{}/system-boot.tar.xz'.format(self.recoveryfs), 'w:xz')
-                system_data_dir = os.path.join(self.bootfs)
-                tar.add(system_data_dir)
+                tar = tarfile.open(
+                    '{}/system-boot.tar.xz'.format(self.recoveryfs), 'w:xz')
+                tar.add(self.bootfs, arcname='.')
                 tar.close()
+                # Copy a initrd.img, kernel.img for embryonic mode booting
+                for root, dirs, files in os.walk(self.bootfs):
+                    for name in files:
+                        if fnmatch(name, 'initrd.img'):
+                            shutil.copy(os.path.join(root, name),
+                                        '{}/boot/'.format(self.recoveryfs))
+                            break
+
+                for root, dirs, files in os.walk(self.bootfs):
+                    for name in files:
+                        if fnmatch(name, 'kernel.img'):
+                            shutil.copy(os.path.join(root, name),
+                                        '{}/boot/'.format(self.recoveryfs))
+                            break
+
+                # Make a system-data in recovery parition for embryonic mode
+                # writable partition
+                copy_tree(self.rootfs, self.recoveryfs)
+                # XXX: To add snap_kernel and snap_core in boot env
+                for root, dirs, files in os.walk('{}/system-data/var/lib/snapd/snaps/'.format(self.recoveryfs)):
+                    for name in files:
+                        if fnmatch(name, '*kernel_*.snap'):
+                            shutil.move(os.path.join(
+                                root, name), '{}/system-data/var/lib/snapd/snaps/kernel.snap'.format(self.recoveryfs))
+                            break
+
+                for root, dirs, files in os.walk('{}/system-data/var/lib/snapd/snaps/'.format(self.recoveryfs)):
+                    for name in files:
+                        if fnmatch(name, 'ubuntu-core_*.snap'):
+                            shutil.move(os.path.join(
+                                root, name), '{}/system-data/var/lib/snapd/snaps/os.snap'.format(self.recoveryfs))
+                            break
 
         self._next.append(self.populate_filesystems)
-        
+
     def populate_filesystems(self):
         volumes = self.gadget.volumes.values()
         assert len(volumes) == 1, 'For now, only one volume is allowed'
@@ -425,7 +460,7 @@ class ModelAssertionBuilder(State):
             part_args['typecode'] = part.type
             # XXX: special-casing.
             if (volume.schema == VolumeSchema.mbr and
-               part.filesystem_label == 'system-boot'):
+                    part.filesystem_label == 'system-boot'):
                 part_args['activate'] = True
             if part.name is not None:               # pragma: nobranch
                 part_args['change_name'] = part.name
